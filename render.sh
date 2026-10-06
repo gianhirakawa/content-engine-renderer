@@ -19,7 +19,10 @@ FONT=${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf}
 VF="[0:v]scale=2160:3840:force_original_aspect_ratio=increase,crop=2160:3840,setsar=1,"
 VF+="zoompan=z='min(zoom+0.0006,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30,"
 VF+="drawtext=fontfile=${FONT}:textfile=hook.txt:expansion=none:fontsize=${FONTSIZE}:line_spacing=12:fontcolor=white:borderw=6:bordercolor=black:"
-VF+="x=(w-text_w)/2:y=h*0.12:enable='lt(t,3)'[v]"
+VF+="x=(w-text_w)/2:y=h*0.12:enable='lt(t,3)'"
+# TikTok-style word-highlight captions (captions.ass from captions.py), if present
+if [ -s captions.ass ]; then VF+=",ass=captions.ass:fontsdir=fonts"; fi
+VF+="[v]"
 
 ENC=(-c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -r 30 -c:a aac -b:a 160k -ar 44100 -movflags +faststart)
 
