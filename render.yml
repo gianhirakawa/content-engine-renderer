@@ -1,0 +1,81 @@
+# .github/workflows/render.yml  (in the public renderer repo, e.g. gianhirakawa/content-engine-renderer)
+#
+# Triggered by n8n (04d_Render) via repository_dispatch. Renders a 1080x1920
+# vertical video from the character image + voiceover (+ optional music bed),
+# publishes it as a release asset, then POSTs the result back to the waiting
+# n8n execution (Wait node resume URL).
+#
+# Security: every client_payload value is passed through env vars, never
+# interpolated into the shell script, so payload text can't inject commands.
+name: render
+
+on:
+  repository_dispatch:
+    types: [render]
+
+permissions:
+  contents: write   # create the release that hosts out.mp4
+
+concurrency:
+  group: render-${{ github.event.client_payload.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUN_ID: ${{ github.event.client_payload.run_id }}
+      IMAGE_URL: ${{ github.event.client_payload.image_url }}
+      VOICE_URL: ${{ github.event.client_payload.voice_url }}
+      MUSIC_URL: ${{ github.event.client_payload.music_url }}
+      HOOK_TEXT: ${{ github.event.client_payload.hook_text }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4   # brings render.sh
+
+      - name: Install ffmpeg + font
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core jq
+
+      - name: Download assets
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 2 "$IMAGE_URL" -o img
+          curl -fsSL --retry 3 --retry-delay 2 "$VOICE_URL" -o voice
+          if [ -n "${MUSIC_URL:-}" ]; then
+            curl -fsSL --retry 3 --retry-delay 2 "$MUSIC_URL" -o music || { echo "music download failed - rendering without bed"; rm -f music; }
+          fi
+          ls -la
+
+      - name: Render 1080x1920
+        id: render
+        run: bash render.sh | tee -a "$GITHUB_OUTPUT"   # prints duration=… and render_seconds=…
+
+      - name: Publish release asset
+        id: publish
+        run: |
+          set -euo pipefail
+          TAG="render-$(printf '%s' "$RUN_ID" | tr -cd 'A-Za-z0-9_-')"
+          gh release create "$TAG" out.mp4 --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Rendered for content-engine run $TAG"
+          echo "url=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/out.mp4" >> "$GITHUB_OUTPUT"
+
+      - name: Callback (success)
+        env:
+          VIDEO_URL: ${{ steps.publish.outputs.url }}
+          DURATION: ${{ steps.render.outputs.duration }}
+          RENDER_SECONDS: ${{ steps.render.outputs.render_seconds }}
+        run: |
+          set -euo pipefail
+          jq -n --arg t "$CALLBACK_TOKEN" --arg u "$VIDEO_URL" --arg d "$DURATION" --arg r "$RENDER_SECONDS" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{status:"success", callback_token:$t, video_url:$u, duration_sec:($d|tonumber), render_seconds:($r|tonumber), run_url:$run}' > cb.json
+          curl -fsS --retry 3 -X POST -H 'Content-Type: application/json' --data @cb.json "$CALLBACK_URL"
+
+      - name: Callback (failure)
+        if: failure()
+        run: |
+          jq -n --arg t "$CALLBACK_TOKEN" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{status:"failed", callback_token:$t, error:"render job failed - see run_url", run_url:$run}' > cb.json
+          curl -fsS --retry 3 -X POST -H 'Content-Type: application/json' --data @cb.json "$CALLBACK_URL" || true
