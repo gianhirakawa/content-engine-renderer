@@ -30,11 +30,22 @@ jobs:
       VOICE_URL: ${{ github.event.client_payload.voice_url }}
       MUSIC_URL: ${{ github.event.client_payload.music_url }}
       HOOK_TEXT: ${{ github.event.client_payload.hook_text }}
+      SCRIPT: ${{ github.event.client_payload.script }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4   # brings render.sh
+      - uses: actions/checkout@v4   # brings render.sh + captions.py
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-base-en-v1
 
       - name: Install ffmpeg + font
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core jq
@@ -48,6 +59,16 @@ jobs:
             curl -fsSL --retry 3 --retry-delay 2 "$MUSIC_URL" -o music || { echo "music download failed - rendering without bed"; rm -f music; }
           fi
           ls -la
+
+      - name: Captions (word timing from audio, text from script)
+        id: captions
+        continue-on-error: true   # captions never block the render
+        run: |
+          pip install --quiet faster-whisper || echo "faster-whisper unavailable - estimated timing will be used"
+          mkdir -p fonts
+          curl -fsSL --retry 3 -o fonts/Anton-Regular.ttf \
+            https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf || echo "font download failed - libass will use a fallback font"
+          python3 captions.py voice captions.ass | tee -a "$GITHUB_OUTPUT"
 
       - name: Render 1080x1920
         id: render
@@ -66,11 +87,12 @@ jobs:
           VIDEO_URL: ${{ steps.publish.outputs.url }}
           DURATION: ${{ steps.render.outputs.duration }}
           RENDER_SECONDS: ${{ steps.render.outputs.render_seconds }}
+          CAPTION_TIMING: ${{ steps.captions.outputs.caption_timing }}
         run: |
           set -euo pipefail
-          jq -n --arg t "$CALLBACK_TOKEN" --arg u "$VIDEO_URL" --arg d "$DURATION" --arg r "$RENDER_SECONDS" \
+          jq -n --arg t "$CALLBACK_TOKEN" --arg u "$VIDEO_URL" --arg d "$DURATION" --arg r "$RENDER_SECONDS" --arg c "${CAPTION_TIMING:-none}" \
             --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            '{status:"success", callback_token:$t, video_url:$u, duration_sec:($d|tonumber), render_seconds:($r|tonumber), run_url:$run}' > cb.json
+            '{status:"success", callback_token:$t, video_url:$u, duration_sec:($d|tonumber), render_seconds:($r|tonumber), caption_timing:$c, run_url:$run}' > cb.json
           curl -fsS --retry 3 -X POST -H 'Content-Type: application/json' --data @cb.json "$CALLBACK_URL"
 
       - name: Callback (failure)
